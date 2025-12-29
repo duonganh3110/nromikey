@@ -3,7 +3,7 @@ name: Build APK (from zip)
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 concurrency:
   group: build-apk-${{ github.ref }}
@@ -28,43 +28,79 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # Setup Android SDK cmdline-tools + install needed packages
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: "platform-tools build-tools;34.0.0 platforms;android-34 cmdline-tools;latest"
-
       - name: Install system deps
         run: |
-          set -eux
           sudo apt-get update
           sudo apt-get install -y \
-            git zip unzip rsync ant \
+            git zip unzip rsync curl \
             build-essential ccache \
             autoconf automake libtool pkg-config \
             libffi-dev libssl-dev zlib1g-dev \
             libjpeg-dev libpng-dev \
             libltdl-dev \
+            cmake ninja-build \
             python3-dev
-          java -version
-          ant -version
 
       - name: Install Buildozer
         run: |
-          set -eux
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install "cython<3" buildozer
 
-      - name: Cache Buildozer/Gradle
+      - name: Cache buildozer/pip
         uses: actions/cache@v4
         with:
           path: |
             ~/.buildozer
-            ~/.gradle/caches
-            ~/.gradle/wrapper
+            ~/.cache/pip
           key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
             buildozer-${{ runner.os }}-
+
+      - name: Prepare Android SDK (cmdline-tools + build-tools) in HOME
+        run: |
+          set -eux
+          SDKROOT="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$SDKROOT"
+
+          # Download Android cmdline-tools (official)
+          curl -L -o cmdline.zip "https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip"
+          rm -rf "$SDKROOT/cmdline-tools"
+          mkdir -p "$SDKROOT/cmdline-tools"
+          unzip -q cmdline.zip -d "$SDKROOT/cmdline-tools"
+
+          mkdir -p "$SDKROOT/cmdline-tools/latest"
+          # Zip thường giải nén ra thư mục cmdline-tools/; ta move vào latest/
+          if [ -d "$SDKROOT/cmdline-tools/cmdline-tools" ]; then
+            mv "$SDKROOT/cmdline-tools/cmdline-tools"/* "$SDKROOT/cmdline-tools/latest/"
+            rmdir "$SDKROOT/cmdline-tools/cmdline-tools"
+          else
+            # fallback
+            find "$SDKROOT/cmdline-tools" -maxdepth 1 -mindepth 1 -type d -exec bash -lc 'shopt -s dotglob; mv "$0"/* "'"$SDKROOT"'/cmdline-tools/latest/" || true' {} \;
+          fi
+
+          echo "$SDKROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDKROOT/platform-tools" >> "$GITHUB_PATH"
+
+          export ANDROID_SDK_ROOT="$SDKROOT"
+          export ANDROID_HOME="$SDKROOT"
+
+          # Buildozer bản cũ hay check tools/bin/sdkmanager => tạo shim cho chắc
+          mkdir -p "$SDKROOT/tools/bin"
+          ln -sf "$SDKROOT/cmdline-tools/latest/bin/sdkmanager" "$SDKROOT/tools/bin/sdkmanager"
+
+          # tránh warning repositories.cfg
+          mkdir -p "$HOME/.android"
+          touch "$HOME/.android/repositories.cfg"
+
+          # Accept licenses + install packages cần có "aidl"
+          yes | sdkmanager --licenses
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+          echo "✅ SDKROOT=$SDKROOT"
+          ls -ლა "$SDKROOT/build-tools" || true
 
       - name: Unzip project
         run: |
@@ -75,6 +111,7 @@ jobs:
           ZIP_FILE="$(ls -1 *.zip | head -n 1 || true)"
           if [ -z "$ZIP_FILE" ]; then
             echo "❌ Không thấy file .zip ở gốc repo"
+            ls -la
             exit 1
           fi
 
@@ -91,6 +128,7 @@ jobs:
           MAIN_PATH="$(find work -type f -name 'main.py' | head -n 1)"
           if [ -z "$MAIN_PATH" ]; then
             echo "❌ Không tìm thấy main.py sau khi unzip"
+            find work -maxdepth 5 -type f | head -n 200
             exit 1
           fi
 
@@ -103,48 +141,33 @@ jobs:
             exit 1
           fi
 
-          # Copy buildozer.spec vào đúng thư mục có main.py
           cp "$GITHUB_WORKSPACE/buildozer.spec" "$PROJECT_DIR/buildozer.spec"
 
-          # Nếu có p4a-recipes thì copy vào cạnh main.py
+          # Nếu có local recipes (vd pygame-ce), copy vào cạnh main.py
           if [ -d "$GITHUB_WORKSPACE/p4a-recipes" ]; then
             rsync -a "$GITHUB_WORKSPACE/p4a-recipes" "$PROJECT_DIR/"
           fi
 
           cd "$PROJECT_DIR"
 
-          # Buildozer/p4a đôi khi check sdkmanager ở tools/bin (đường dẫn cũ)
-          # Tạo shim tools/bin/sdkmanager -> sdkmanager thật trong cmdline-tools
-          SDKROOT="/usr/local/lib/android/sdk"
-          SDKM="$(command -v sdkmanager || true)"
-          if [ -n "$SDKM" ]; then
-            mkdir -p "$SDKROOT/tools/bin"
-            ln -sf "$SDKM" "$SDKROOT/tools/bin/sdkmanager"
-            echo "✅ sdkmanager shim: $SDKROOT/tools/bin/sdkmanager -> $SDKM"
-          else
-            echo "⚠️ Không tìm thấy sdkmanager trong PATH"
-            echo "PATH=$PATH"
-            ls -la "$SDKROOT" || true
-          fi
-
-          # Check syntax (không chặn build)
+          # check cú pháp (không chặn build)
           python -m compileall -q -f . || true
 
-          # Ép dùng Android SDK của runner (tránh lỗi thiếu build-tools/aidl)
-          export APP_ANDROID_SDK_PATH="/usr/local/lib/android/sdk"
-          export ANDROID_HOME="/usr/local/lib/android/sdk"
-          export ANDROID_SDK_ROOT="/usr/local/lib/android/sdk"
+          # Trỏ SDK về cái SDKROOT writable vừa cài ở HOME
+          export APP_ANDROID_SDK_PATH="$HOME/.buildozer/android/platform/android-sdk"
+          export ANDROID_SDK_ROOT="$APP_ANDROID_SDK_PATH"
+          export ANDROID_HOME="$APP_ANDROID_SDK_PATH"
 
           set -o pipefail
           buildozer -v android debug 2>&1 | tee "$GITHUB_WORKSPACE/buildozer.log"
 
-      - name: Show last log lines on failure
+      - name: Show logs on failure
         if: failure()
         run: |
-          echo "==== GREP IMPORTANT LINES ===="
-          grep -nE "ERROR|FAIL|Traceback|Exception|not found|No such file|recipe|sdkmanager|gradle|clang|Cython|aidl" buildozer.log | tail -n 200 || true
-          echo "==== LAST 250 LINES ===="
-          tail -n 250 buildozer.log || true
+          echo "==== IMPORTANT LINES (tail) ===="
+          grep -nE "ERROR|FAIL|Traceback|Exception|NoRecipe|not found|Aidl|sdkmanager|build-tools|ndk|clang|Cython|Recipe|gradle" buildozer.log | tail -n 220 || true
+          echo "==== LAST 350 LINES ===="
+          tail -n 350 buildozer.log || true
 
       - name: Upload logs
         if: always()
