@@ -41,11 +41,13 @@ jobs:
             build-tools;34.0.0
             platforms;android-34
 
+      # ✅ FIX: không fail vì "yes: Broken pipe"
       - name: Accept Android licenses
         shell: bash
         run: |
           set -eux
-          yes | sdkmanager --licenses
+          set +o pipefail
+          yes 2>/dev/null | sdkmanager --licenses >/dev/null
 
       - name: Install system deps
         run: |
@@ -109,16 +111,19 @@ jobs:
           echo "✅ main.py = $MAIN_PATH"
           echo "✅ PROJECT_DIR = $PROJECT_DIR"
 
-          # Copy buildozer.spec từ root repo vào cạnh main.py
           if [ ! -f "$GITHUB_WORKSPACE/buildozer.spec" ]; then
             echo "❌ Không có buildozer.spec ở gốc repo"
             exit 1
           fi
           cp "$GITHUB_WORKSPACE/buildozer.spec" "$PROJECT_DIR/buildozer.spec"
 
+          if [ -d "$GITHUB_WORKSPACE/p4a-recipes" ]; then
+            rsync -a "$GITHUB_WORKSPACE/p4a-recipes" "$PROJECT_DIR/"
+          fi
+
           cd "$PROJECT_DIR"
 
-          # Tạo shim: tools/bin/sdkmanager -> sdkmanager thật (để buildozer khỏi kêu thiếu)
+          # ✅ Shim: buildozer hay tìm tools/bin/sdkmanager (đường dẫn cũ)
           SDKM="$(command -v sdkmanager || true)"
           if [ -z "$SDKM" ]; then
             echo "❌ Không tìm thấy sdkmanager trong PATH"
@@ -129,10 +134,8 @@ jobs:
           ln -sf "$SDKM" "$ANDROID_SDK_ROOT/tools/bin/sdkmanager"
           echo "✅ sdkmanager shim: $ANDROID_SDK_ROOT/tools/bin/sdkmanager -> $SDKM"
 
-          # Check syntax (không chặn build)
           python -m compileall -q -f . || true
 
-          # Export cho p4a/buildozer
           export APP_ANDROID_SDK_PATH="$ANDROID_SDK_ROOT"
           export ANDROID_HOME="$ANDROID_SDK_ROOT"
           export ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT"
