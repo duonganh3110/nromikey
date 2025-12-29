@@ -15,6 +15,8 @@ orientation = landscape
 android.archs = arm64-v8a,armeabi-v7a
 android.permissions = INTERNET
 android.api = 34
+android.sdk_path = /usr/local/lib/android/sdk
+
 android.minapi = 21
 android.ndk_api = 21
 
