@@ -1,0 +1,72 @@
+name: Build APK (from zip)
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-pip python3-venv git zip unzip openjdk-17-jdk \
+            build-essential ccache \
+            libffi-dev libssl-dev zlib1g-dev \
+            autoconf automake libtool pkg-config \
+            libjpeg-dev libpng-dev
+
+      - name: Install Buildozer
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install "cython<3" buildozer
+
+      - name: Unzip project (auto pick first zip)
+        run: |
+          set -eux
+          rm -rf work
+          mkdir -p work
+          ZIP_FILE="$(ls -1 *.zip | head -n 1 || true)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "❌ Không thấy file .zip ở gốc repo"
+            exit 1
+          fi
+          echo "✅ Using zip: $ZIP_FILE"
+          unzip -q "$ZIP_FILE" -d work
+          echo "=== Preview after unzip ==="
+          find work -maxdepth 3 -type f | head -n 80
+
+      - name: Locate main.py and build
+        run: |
+          set -eux
+          MAIN_PATH="$(find work -type f -name 'main.py' | head -n 1)"
+          if [ -z "$MAIN_PATH" ]; then
+            echo "❌ Không tìm thấy main.py sau khi unzip"
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$MAIN_PATH")"
+          echo "✅ main.py = $MAIN_PATH"
+          echo "✅ PROJECT_DIR = $PROJECT_DIR"
+
+          # Copy spec từ root repo vào cạnh main.py
+          cp "$GITHUB_WORKSPACE/buildozer.spec" "$PROJECT_DIR/buildozer.spec"
+
+          cd "$PROJECT_DIR"
+
+          # Báo lỗi cú pháp nếu có, nhưng không chặn build
+          python3 -m compileall -q -f . || true
+
+          buildozer -v android debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: |
+            work/**/bin/*.apk
+
