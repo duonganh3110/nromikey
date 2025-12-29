@@ -12,6 +12,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # (Tuỳ chọn) Cache để lần sau nhanh hơn
+      - name: Cache buildozer & gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.gradle
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -43,9 +54,9 @@ jobs:
           unzip -q "$ZIP_FILE" -d work
 
           echo "=== Preview after unzip ==="
-          find work -maxdepth 3 -type f | head -n 80
+          find work -maxdepth 3 -type f | head -n 120
 
-      - name: Locate main.py and build (auto accept SDK licenses)
+      - name: Locate main.py, copy spec, build (save full logs)
         run: |
           set -eux
 
@@ -59,42 +70,50 @@ jobs:
           echo "✅ main.py = $MAIN_PATH"
           echo "✅ PROJECT_DIR = $PROJECT_DIR"
 
-          # Copy buildozer.spec từ root repo vào cạnh main.py
           if [ ! -f "$GITHUB_WORKSPACE/buildozer.spec" ]; then
             echo "❌ Không có buildozer.spec ở gốc repo"
             exit 1
           fi
+
+          # Copy buildozer.spec vào cạnh main.py
           cp "$GITHUB_WORKSPACE/buildozer.spec" "$PROJECT_DIR/buildozer.spec"
 
           cd "$PROJECT_DIR"
 
-          # Báo lỗi cú pháp nếu có, nhưng KHÔNG chặn build
+          # Check syntax (không chặn build)
           python3 -m compileall -q -f . || true
 
-          # Chạy lần 1 để Buildozer/p4a tự tải SDK/NDK (nếu cần)
-          buildozer -v android debug || true
-
-          # Accept Android SDK licenses (sau khi SDK đã xuất hiện)
+          # Nếu SDK của buildozer đã tồn tại thì accept license trước (không bắt buộc)
           ANDROID_SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
           if [ -d "$ANDROID_SDK_ROOT" ]; then
-            echo "✅ ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
             SDKMANAGER_PATH="$(find "$ANDROID_SDK_ROOT" -type f -name sdkmanager | head -n 1 || true)"
             if [ -n "$SDKMANAGER_PATH" ]; then
-              echo "✅ sdkmanager = $SDKMANAGER_PATH"
+              echo "✅ Accept SDK licenses via sdkmanager"
               yes | "$SDKMANAGER_PATH" --licenses || true
-            else
-              echo "⚠️ Không tìm thấy sdkmanager (nhưng vẫn thử build tiếp)"
             fi
-          else
-            echo "⚠️ Chưa thấy Android SDK folder, vẫn thử build tiếp"
           fi
 
-          # Chạy lần 2 build thật
-          buildozer -v android debug
+          # Build + lưu log (pipefail để fail đúng)
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee "$GITHUB_WORKSPACE/buildozer.log"
 
-      - name: Upload APK
+      # Upload APK (chỉ khi có)
+      - name: Upload APK (if exists)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: apk
           path: |
             work/**/bin/*.apk
+
+      # Upload logs LUÔN LUÔN (dù fail)
+      - name: Upload build logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            buildozer.log
+            work/**/.buildozer/**/buildozer.log
+            work/**/.buildozer/**/log.txt
+            work/**/.buildozer/**
