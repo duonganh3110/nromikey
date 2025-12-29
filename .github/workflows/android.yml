@@ -127,6 +127,10 @@ jobs:
 
           # Build + log
           set -o pipefail
+          export APP_ANDROID_SDK_PATH="/usr/local/lib/android/sdk"
+          export ANDROID_HOME="/usr/local/lib/android/sdk"
+          export ANDROID_SDK_ROOT="/usr/local/lib/android/sdk"
+
           buildozer -v android debug 2>&1 | tee "$GITHUB_WORKSPACE/buildozer.log"
 
       - name: Show last log lines on failure
