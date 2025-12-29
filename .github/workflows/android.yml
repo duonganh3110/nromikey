@@ -12,7 +12,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Setup Python (KHÔNG dùng pip cache để khỏi cần requirements.txt/pyproject.toml)
+      # Setup Python (không dùng pip cache để khỏi cần requirements.txt/pyproject.toml)
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -24,12 +24,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             git zip unzip openjdk-17-jdk \
+            ant \
             build-essential ccache \
             libffi-dev libssl-dev zlib1g-dev \
             autoconf automake libtool pkg-config \
             libjpeg-dev libpng-dev \
             cmake
           java -version
+          ant -version
 
       # Accept Android SDK licenses (dùng SDK có sẵn trên runner)
       - name: Accept Android SDK licenses (hosted SDK)
@@ -74,6 +76,7 @@ jobs:
       - name: Build APK (save log)
         run: |
           set -eux
+
           MAIN_PATH="$(find work -type f -name 'main.py' | head -n 1)"
           if [ -z "$MAIN_PATH" ]; then
             echo "❌ Không tìm thấy main.py sau khi unzip"
@@ -94,6 +97,7 @@ jobs:
 
           cd "$PROJECT_DIR"
 
+          # Check cú pháp (không chặn build)
           python -m compileall -q -f . || true
 
           # Dùng Android SDK/NDK có sẵn trên runner
