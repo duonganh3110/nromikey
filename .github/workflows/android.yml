@@ -7,8 +7,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Install system deps
         run: |
@@ -25,24 +27,28 @@ jobs:
           python3 -m pip install --upgrade pip
           pip install "cython<3" buildozer
 
-      - name: Unzip project (auto pick first zip)
+      - name: Unzip project
         run: |
           set -eux
           rm -rf work
           mkdir -p work
+
           ZIP_FILE="$(ls -1 *.zip | head -n 1 || true)"
           if [ -z "$ZIP_FILE" ]; then
             echo "❌ Không thấy file .zip ở gốc repo"
             exit 1
           fi
+
           echo "✅ Using zip: $ZIP_FILE"
           unzip -q "$ZIP_FILE" -d work
+
           echo "=== Preview after unzip ==="
           find work -maxdepth 3 -type f | head -n 80
 
-      - name: Locate main.py and build
+      - name: Locate main.py and build (auto accept SDK licenses)
         run: |
           set -eux
+
           MAIN_PATH="$(find work -type f -name 'main.py' | head -n 1)"
           if [ -z "$MAIN_PATH" ]; then
             echo "❌ Không tìm thấy main.py sau khi unzip"
@@ -53,14 +59,37 @@ jobs:
           echo "✅ main.py = $MAIN_PATH"
           echo "✅ PROJECT_DIR = $PROJECT_DIR"
 
-          # Copy spec từ root repo vào cạnh main.py
+          # Copy buildozer.spec từ root repo vào cạnh main.py
+          if [ ! -f "$GITHUB_WORKSPACE/buildozer.spec" ]; then
+            echo "❌ Không có buildozer.spec ở gốc repo"
+            exit 1
+          fi
           cp "$GITHUB_WORKSPACE/buildozer.spec" "$PROJECT_DIR/buildozer.spec"
 
           cd "$PROJECT_DIR"
 
-          # Báo lỗi cú pháp nếu có, nhưng không chặn build
+          # Báo lỗi cú pháp nếu có, nhưng KHÔNG chặn build
           python3 -m compileall -q -f . || true
 
+          # Chạy lần 1 để Buildozer/p4a tự tải SDK/NDK (nếu cần)
+          buildozer -v android debug || true
+
+          # Accept Android SDK licenses (sau khi SDK đã xuất hiện)
+          ANDROID_SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
+          if [ -d "$ANDROID_SDK_ROOT" ]; then
+            echo "✅ ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+            SDKMANAGER_PATH="$(find "$ANDROID_SDK_ROOT" -type f -name sdkmanager | head -n 1 || true)"
+            if [ -n "$SDKMANAGER_PATH" ]; then
+              echo "✅ sdkmanager = $SDKMANAGER_PATH"
+              yes | "$SDKMANAGER_PATH" --licenses || true
+            else
+              echo "⚠️ Không tìm thấy sdkmanager (nhưng vẫn thử build tiếp)"
+            fi
+          else
+            echo "⚠️ Chưa thấy Android SDK folder, vẫn thử build tiếp"
+          fi
+
+          # Chạy lần 2 build thật
           buildozer -v android debug
 
       - name: Upload APK
@@ -69,4 +98,3 @@ jobs:
           name: apk
           path: |
             work/**/bin/*.apk
-
