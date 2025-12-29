@@ -12,11 +12,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Setup Python (KHÔNG dùng pip cache để khỏi cần requirements.txt/pyproject.toml)
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install system deps
         run: |
@@ -31,6 +31,7 @@ jobs:
             cmake
           java -version
 
+      # Accept Android SDK licenses (dùng SDK có sẵn trên runner)
       - name: Accept Android SDK licenses (hosted SDK)
         run: |
           set -eux
@@ -41,7 +42,7 @@ jobs:
           fi
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "sdkmanager=$SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses
+          yes | "$SDKMANAGER" --licenses || true
 
           # Cài tối thiểu để tránh lỗi kiểu "Aidl not found"
           "$SDKMANAGER" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
@@ -70,10 +71,9 @@ jobs:
           echo "=== Preview after unzip ==="
           find work -maxdepth 3 -type f | head -n 80
 
-      - name: Build APK
+      - name: Build APK (save log)
         run: |
           set -eux
-
           MAIN_PATH="$(find work -type f -name 'main.py' | head -n 1)"
           if [ -z "$MAIN_PATH" ]; then
             echo "❌ Không tìm thấy main.py sau khi unzip"
@@ -84,28 +84,44 @@ jobs:
           echo "✅ main.py = $MAIN_PATH"
           echo "✅ PROJECT_DIR = $PROJECT_DIR"
 
-          # Copy buildozer.spec + local recipes vào đúng thư mục có main.py
+          # Copy buildozer.spec vào cạnh main.py
           cp "$GITHUB_WORKSPACE/buildozer.spec" "$PROJECT_DIR/buildozer.spec"
-          rsync -a "$GITHUB_WORKSPACE/p4a-recipes" "$PROJECT_DIR/"
+
+          # Nếu repo có p4a-recipes (pygame-ce local recipe) thì copy sang luôn
+          if [ -d "$GITHUB_WORKSPACE/p4a-recipes" ]; then
+            rsync -a "$GITHUB_WORKSPACE/p4a-recipes" "$PROJECT_DIR/"
+          fi
 
           cd "$PROJECT_DIR"
 
-          # Check cú pháp (không chặn build)
           python -m compileall -q -f . || true
 
-          # Buildozer có thể override config bằng env vars :contentReference[oaicite:3]{index=3}
+          # Dùng Android SDK/NDK có sẵn trên runner
           ANDROID_HOME="/usr/local/lib/android/sdk"
           NDK_DIR="$(ls -d "$ANDROID_HOME"/ndk/* | head -n 1 || true)"
           echo "✅ ANDROID_HOME=$ANDROID_HOME"
           echo "✅ NDK_DIR=$NDK_DIR"
 
+          set -o pipefail
           APP_ANDROID_SDK_PATH="$ANDROID_HOME" \
           APP_ANDROID_NDK_PATH="$NDK_DIR" \
-          buildozer -v android debug
+          buildozer -v android debug 2>&1 | tee "$GITHUB_WORKSPACE/buildozer.log"
 
-      - name: Upload APK
+      - name: Upload APK (if exists)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: apk
           path: |
             work/**/bin/*.apk
+
+      - name: Upload build logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            buildozer.log
+            work/**/.buildozer/**/buildozer.log
+            work/**/.buildozer/**/log.txt
+            work/**/.buildozer/**
