@@ -2,6 +2,7 @@
 title = NRO Online
 package.name = nroonline
 package.domain = org.mikey
+version = 0.1
 source.dir = .
 source.include_exts = py,png,jpg,jpeg,webp,ttf,otf,json,txt,mp3,wav,ogg,atlas
 
