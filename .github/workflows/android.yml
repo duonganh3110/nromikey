@@ -12,7 +12,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Setup Python (không dùng pip cache để khỏi cần requirements.txt/pyproject.toml)
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -25,6 +24,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             git zip unzip openjdk-17-jdk \
             ant \
+            rsync \
             build-essential ccache \
             libffi-dev libssl-dev zlib1g-dev \
             autoconf automake libtool pkg-config \
@@ -33,7 +33,6 @@ jobs:
           java -version
           ant -version
 
-      # Accept Android SDK licenses (dùng SDK có sẵn trên runner)
       - name: Accept Android SDK licenses (hosted SDK)
         run: |
           set -eux
@@ -46,8 +45,23 @@ jobs:
           echo "sdkmanager=$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses || true
 
-          # Cài tối thiểu để tránh lỗi kiểu "Aidl not found"
+          # Cài tối thiểu để tránh thiếu tool
           "$SDKMANAGER" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
+
+      # ✅ FIX CHÍNH: tạo đường dẫn tools/bin/sdkmanager cho p4a/buildozer (đường dẫn cũ)
+      - name: Fix sdkmanager path for p4a (tools/bin)
+        run: |
+          set -eux
+          ANDROID_HOME="/usr/local/lib/android/sdk"
+          REAL_SDKMANAGER="$(find "$ANDROID_HOME" -type f -name sdkmanager | head -n 1 || true)"
+          if [ -z "$REAL_SDKMANAGER" ]; then
+            echo "❌ Không tìm thấy sdkmanager trong $ANDROID_HOME"
+            exit 1
+          fi
+
+          sudo mkdir -p "$ANDROID_HOME/tools/bin"
+          sudo ln -sf "$REAL_SDKMANAGER" "$ANDROID_HOME/tools/bin/sdkmanager"
+          "$ANDROID_HOME/tools/bin/sdkmanager" --version || true
 
       - name: Install Buildozer
         run: |
@@ -90,25 +104,21 @@ jobs:
           # Copy buildozer.spec vào cạnh main.py
           cp "$GITHUB_WORKSPACE/buildozer.spec" "$PROJECT_DIR/buildozer.spec"
 
-          # Nếu repo có p4a-recipes (pygame-ce local recipe) thì copy sang luôn
+          # Nếu repo có p4a-recipes thì copy sang (pygame-ce local recipe)
           if [ -d "$GITHUB_WORKSPACE/p4a-recipes" ]; then
             rsync -a "$GITHUB_WORKSPACE/p4a-recipes" "$PROJECT_DIR/"
           fi
 
           cd "$PROJECT_DIR"
 
-          # Check cú pháp (không chặn build)
           python -m compileall -q -f . || true
 
-          # Dùng Android SDK/NDK có sẵn trên runner
+          # Dùng Android SDK có sẵn trên runner
           ANDROID_HOME="/usr/local/lib/android/sdk"
-          NDK_DIR="$(ls -d "$ANDROID_HOME"/ndk/* | head -n 1 || true)"
           echo "✅ ANDROID_HOME=$ANDROID_HOME"
-          echo "✅ NDK_DIR=$NDK_DIR"
 
           set -o pipefail
           APP_ANDROID_SDK_PATH="$ANDROID_HOME" \
-          APP_ANDROID_NDK_PATH="$NDK_DIR" \
           buildozer -v android debug 2>&1 | tee "$GITHUB_WORKSPACE/buildozer.log"
 
       - name: Upload APK (if exists)
