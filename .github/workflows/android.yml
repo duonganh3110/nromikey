@@ -3,7 +3,7 @@ name: Build APK (from zip)
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
 
 concurrency:
   group: build-apk-${{ github.ref }}
@@ -12,6 +12,11 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    env:
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      ANDROID_HOME: ${{ github.workspace }}/android-sdk
+      ANDROIDSDK: ${{ github.workspace }}/android-sdk
 
     steps:
       - name: Checkout
@@ -28,17 +33,30 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Setup Android SDK (cmdline-tools + build-tools + platforms)
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platform-tools
+            build-tools;34.0.0
+            platforms;android-34
+
+      - name: Accept Android licenses
+        shell: bash
+        run: |
+          set -eux
+          yes | sdkmanager --licenses
+
       - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git zip unzip rsync curl \
+            git zip unzip rsync \
             build-essential ccache \
             autoconf automake libtool pkg-config \
             libffi-dev libssl-dev zlib1g-dev \
             libjpeg-dev libpng-dev \
             libltdl-dev \
-            cmake ninja-build \
             python3-dev
 
       - name: Install Buildozer
@@ -46,63 +64,19 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install "cython<3" buildozer
 
-      - name: Cache buildozer/pip
+      - name: Cache Buildozer/Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.buildozer
-            ~/.cache/pip
+            ~/.gradle/caches
+            ~/.gradle/wrapper
           key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
             buildozer-${{ runner.os }}-
 
-      - name: Prepare Android SDK (cmdline-tools + build-tools) in HOME
-        run: |
-          set -eux
-          SDKROOT="$HOME/.buildozer/android/platform/android-sdk"
-          mkdir -p "$SDKROOT"
-
-          # Download Android cmdline-tools (official)
-          curl -L -o cmdline.zip "https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip"
-          rm -rf "$SDKROOT/cmdline-tools"
-          mkdir -p "$SDKROOT/cmdline-tools"
-          unzip -q cmdline.zip -d "$SDKROOT/cmdline-tools"
-
-          mkdir -p "$SDKROOT/cmdline-tools/latest"
-          # Zip thường giải nén ra thư mục cmdline-tools/; ta move vào latest/
-          if [ -d "$SDKROOT/cmdline-tools/cmdline-tools" ]; then
-            mv "$SDKROOT/cmdline-tools/cmdline-tools"/* "$SDKROOT/cmdline-tools/latest/"
-            rmdir "$SDKROOT/cmdline-tools/cmdline-tools"
-          else
-            # fallback
-            find "$SDKROOT/cmdline-tools" -maxdepth 1 -mindepth 1 -type d -exec bash -lc 'shopt -s dotglob; mv "$0"/* "'"$SDKROOT"'/cmdline-tools/latest/" || true' {} \;
-          fi
-
-          echo "$SDKROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$SDKROOT/platform-tools" >> "$GITHUB_PATH"
-
-          export ANDROID_SDK_ROOT="$SDKROOT"
-          export ANDROID_HOME="$SDKROOT"
-
-          # Buildozer bản cũ hay check tools/bin/sdkmanager => tạo shim cho chắc
-          mkdir -p "$SDKROOT/tools/bin"
-          ln -sf "$SDKROOT/cmdline-tools/latest/bin/sdkmanager" "$SDKROOT/tools/bin/sdkmanager"
-
-          # tránh warning repositories.cfg
-          mkdir -p "$HOME/.android"
-          touch "$HOME/.android/repositories.cfg"
-
-          # Accept licenses + install packages cần có "aidl"
-          yes | sdkmanager --licenses
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0"
-
-          echo "✅ SDKROOT=$SDKROOT"
-          ls -ლა "$SDKROOT/build-tools" || true
-
       - name: Unzip project
+        shell: bash
         run: |
           set -eux
           rm -rf work
@@ -111,7 +85,6 @@ jobs:
           ZIP_FILE="$(ls -1 *.zip | head -n 1 || true)"
           if [ -z "$ZIP_FILE" ]; then
             echo "❌ Không thấy file .zip ở gốc repo"
-            ls -la
             exit 1
           fi
 
@@ -122,13 +95,13 @@ jobs:
           find work -maxdepth 3 -type f | head -n 120
 
       - name: Build APK
+        shell: bash
         run: |
           set -eux
 
           MAIN_PATH="$(find work -type f -name 'main.py' | head -n 1)"
           if [ -z "$MAIN_PATH" ]; then
             echo "❌ Không tìm thấy main.py sau khi unzip"
-            find work -maxdepth 5 -type f | head -n 200
             exit 1
           fi
 
@@ -136,38 +109,46 @@ jobs:
           echo "✅ main.py = $MAIN_PATH"
           echo "✅ PROJECT_DIR = $PROJECT_DIR"
 
+          # Copy buildozer.spec từ root repo vào cạnh main.py
           if [ ! -f "$GITHUB_WORKSPACE/buildozer.spec" ]; then
             echo "❌ Không có buildozer.spec ở gốc repo"
             exit 1
           fi
-
           cp "$GITHUB_WORKSPACE/buildozer.spec" "$PROJECT_DIR/buildozer.spec"
-
-          # Nếu có local recipes (vd pygame-ce), copy vào cạnh main.py
-          if [ -d "$GITHUB_WORKSPACE/p4a-recipes" ]; then
-            rsync -a "$GITHUB_WORKSPACE/p4a-recipes" "$PROJECT_DIR/"
-          fi
 
           cd "$PROJECT_DIR"
 
-          # check cú pháp (không chặn build)
+          # Tạo shim: tools/bin/sdkmanager -> sdkmanager thật (để buildozer khỏi kêu thiếu)
+          SDKM="$(command -v sdkmanager || true)"
+          if [ -z "$SDKM" ]; then
+            echo "❌ Không tìm thấy sdkmanager trong PATH"
+            echo "PATH=$PATH"
+            exit 1
+          fi
+          mkdir -p "$ANDROID_SDK_ROOT/tools/bin"
+          ln -sf "$SDKM" "$ANDROID_SDK_ROOT/tools/bin/sdkmanager"
+          echo "✅ sdkmanager shim: $ANDROID_SDK_ROOT/tools/bin/sdkmanager -> $SDKM"
+
+          # Check syntax (không chặn build)
           python -m compileall -q -f . || true
 
-          # Trỏ SDK về cái SDKROOT writable vừa cài ở HOME
-          export APP_ANDROID_SDK_PATH="$HOME/.buildozer/android/platform/android-sdk"
-          export ANDROID_SDK_ROOT="$APP_ANDROID_SDK_PATH"
-          export ANDROID_HOME="$APP_ANDROID_SDK_PATH"
+          # Export cho p4a/buildozer
+          export APP_ANDROID_SDK_PATH="$ANDROID_SDK_ROOT"
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          export ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT"
+          export ANDROIDSDK="$ANDROID_SDK_ROOT"
 
           set -o pipefail
           buildozer -v android debug 2>&1 | tee "$GITHUB_WORKSPACE/buildozer.log"
 
-      - name: Show logs on failure
+      - name: Show last log lines on failure
         if: failure()
+        shell: bash
         run: |
-          echo "==== IMPORTANT LINES (tail) ===="
-          grep -nE "ERROR|FAIL|Traceback|Exception|NoRecipe|not found|Aidl|sdkmanager|build-tools|ndk|clang|Cython|Recipe|gradle" buildozer.log | tail -n 220 || true
-          echo "==== LAST 350 LINES ===="
-          tail -n 350 buildozer.log || true
+          echo "==== GREP IMPORTANT LINES ===="
+          grep -nE "ERROR|FAIL|Traceback|Exception|not found|No such file|recipe|sdkmanager|gradle|clang|Cython|aidl|build-tools" buildozer.log | tail -n 200 || true
+          echo "==== LAST 250 LINES ===="
+          tail -n 250 buildozer.log || true
 
       - name: Upload logs
         if: always()
