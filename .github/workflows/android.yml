@@ -9,33 +9,47 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # (Tuỳ chọn) Cache để lần sau nhanh hơn
-      - name: Cache buildozer & gradle
-        uses: actions/cache@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          path: |
-            ~/.buildozer
-            ~/.gradle
-          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
-          restore-keys: |
-            buildozer-${{ runner.os }}-
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install system deps
         run: |
+          set -eux
           sudo apt-get update
-          sudo apt-get install -y \
-            python3-pip python3-venv git zip unzip openjdk-17-jdk \
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip openjdk-17-jdk \
             build-essential ccache \
             libffi-dev libssl-dev zlib1g-dev \
             autoconf automake libtool pkg-config \
-            libjpeg-dev libpng-dev
+            libjpeg-dev libpng-dev \
+            cmake
+          java -version
+
+      - name: Accept Android SDK licenses (hosted SDK)
+        run: |
+          set -eux
+          ANDROID_HOME="/usr/local/lib/android/sdk"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME" -type f -name sdkmanager | head -n 1 || true)"
+          fi
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "sdkmanager=$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses
+
+          # Cài tối thiểu để tránh lỗi kiểu "Aidl not found"
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
 
       - name: Install Buildozer
         run: |
-          python3 -m pip install --upgrade pip
+          set -eux
+          python -m pip install --upgrade pip
           pip install "cython<3" buildozer
 
       - name: Unzip project
@@ -54,9 +68,9 @@ jobs:
           unzip -q "$ZIP_FILE" -d work
 
           echo "=== Preview after unzip ==="
-          find work -maxdepth 3 -type f | head -n 120
+          find work -maxdepth 3 -type f | head -n 80
 
-      - name: Locate main.py, copy spec, build (save full logs)
+      - name: Build APK
         run: |
           set -eux
 
@@ -70,50 +84,28 @@ jobs:
           echo "✅ main.py = $MAIN_PATH"
           echo "✅ PROJECT_DIR = $PROJECT_DIR"
 
-          if [ ! -f "$GITHUB_WORKSPACE/buildozer.spec" ]; then
-            echo "❌ Không có buildozer.spec ở gốc repo"
-            exit 1
-          fi
-
-          # Copy buildozer.spec vào cạnh main.py
+          # Copy buildozer.spec + local recipes vào đúng thư mục có main.py
           cp "$GITHUB_WORKSPACE/buildozer.spec" "$PROJECT_DIR/buildozer.spec"
+          rsync -a "$GITHUB_WORKSPACE/p4a-recipes" "$PROJECT_DIR/"
 
           cd "$PROJECT_DIR"
 
-          # Check syntax (không chặn build)
-          python3 -m compileall -q -f . || true
+          # Check cú pháp (không chặn build)
+          python -m compileall -q -f . || true
 
-          # Nếu SDK của buildozer đã tồn tại thì accept license trước (không bắt buộc)
-          ANDROID_SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
-          if [ -d "$ANDROID_SDK_ROOT" ]; then
-            SDKMANAGER_PATH="$(find "$ANDROID_SDK_ROOT" -type f -name sdkmanager | head -n 1 || true)"
-            if [ -n "$SDKMANAGER_PATH" ]; then
-              echo "✅ Accept SDK licenses via sdkmanager"
-              yes | "$SDKMANAGER_PATH" --licenses || true
-            fi
-          fi
+          # Buildozer có thể override config bằng env vars :contentReference[oaicite:3]{index=3}
+          ANDROID_HOME="/usr/local/lib/android/sdk"
+          NDK_DIR="$(ls -d "$ANDROID_HOME"/ndk/* | head -n 1 || true)"
+          echo "✅ ANDROID_HOME=$ANDROID_HOME"
+          echo "✅ NDK_DIR=$NDK_DIR"
 
-          # Build + lưu log (pipefail để fail đúng)
-          set -o pipefail
-          buildozer -v android debug 2>&1 | tee "$GITHUB_WORKSPACE/buildozer.log"
+          APP_ANDROID_SDK_PATH="$ANDROID_HOME" \
+          APP_ANDROID_NDK_PATH="$NDK_DIR" \
+          buildozer -v android debug
 
-      # Upload APK (chỉ khi có)
-      - name: Upload APK (if exists)
-        if: always()
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: apk
           path: |
             work/**/bin/*.apk
-
-      # Upload logs LUÔN LUÔN (dù fail)
-      - name: Upload build logs (always)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            buildozer.log
-            work/**/.buildozer/**/buildozer.log
-            work/**/.buildozer/**/log.txt
-            work/**/.buildozer/**
