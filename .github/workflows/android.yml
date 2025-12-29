@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
@@ -15,23 +15,24 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
-      - name: Install system deps
+      - name: Install system deps (full)
         run: |
           set -eux
           sudo apt-get update
+          # Theo Buildozer docs (Ubuntu 20.04/22.04) + thêm ant/rsync/build-essential
           sudo apt-get install -y --no-install-recommends \
-            git zip unzip openjdk-17-jdk \
-            ant \
-            rsync \
+            git zip unzip openjdk-17-jdk python3-pip \
+            autoconf libtool pkg-config \
+            zlib1g-dev libffi-dev libssl-dev cmake \
+            libncurses5-dev libncursesw5-dev libtinfo5 \
             build-essential ccache \
-            libffi-dev libssl-dev zlib1g-dev \
-            autoconf automake libtool pkg-config \
-            libjpeg-dev libpng-dev \
-            cmake
+            ant rsync \
+            libjpeg-dev libpng-dev
           java -version
           ant -version
+          python --version
 
       - name: Accept Android SDK licenses (hosted SDK)
         run: |
@@ -44,11 +45,8 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "sdkmanager=$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses || true
-
-          # Cài tối thiểu để tránh thiếu tool
           "$SDKMANAGER" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
 
-      # ✅ FIX CHÍNH: tạo đường dẫn tools/bin/sdkmanager cho p4a/buildozer (đường dẫn cũ)
       - name: Fix sdkmanager path for p4a (tools/bin)
         run: |
           set -eux
@@ -58,7 +56,6 @@ jobs:
             echo "❌ Không tìm thấy sdkmanager trong $ANDROID_HOME"
             exit 1
           fi
-
           sudo mkdir -p "$ANDROID_HOME/tools/bin"
           sudo ln -sf "$REAL_SDKMANAGER" "$ANDROID_HOME/tools/bin/sdkmanager"
           "$ANDROID_HOME/tools/bin/sdkmanager" --version || true
@@ -83,11 +80,9 @@ jobs:
 
           echo "✅ Using zip: $ZIP_FILE"
           unzip -q "$ZIP_FILE" -d work
-
-          echo "=== Preview after unzip ==="
           find work -maxdepth 3 -type f | head -n 80
 
-      - name: Build APK (save log)
+      - name: Build APK (always print error tail)
         run: |
           set -eux
 
@@ -101,25 +96,34 @@ jobs:
           echo "✅ main.py = $MAIN_PATH"
           echo "✅ PROJECT_DIR = $PROJECT_DIR"
 
-          # Copy buildozer.spec vào cạnh main.py
           cp "$GITHUB_WORKSPACE/buildozer.spec" "$PROJECT_DIR/buildozer.spec"
 
-          # Nếu repo có p4a-recipes thì copy sang (pygame-ce local recipe)
           if [ -d "$GITHUB_WORKSPACE/p4a-recipes" ]; then
             rsync -a "$GITHUB_WORKSPACE/p4a-recipes" "$PROJECT_DIR/"
           fi
 
           cd "$PROJECT_DIR"
-
           python -m compileall -q -f . || true
 
-          # Dùng Android SDK có sẵn trên runner
-          ANDROID_HOME="/usr/local/lib/android/sdk"
-          echo "✅ ANDROID_HOME=$ANDROID_HOME"
+          export ANDROID_HOME="/usr/local/lib/android/sdk"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          export ANDROIDSDK="$ANDROID_HOME"
 
+          set +e
           set -o pipefail
-          APP_ANDROID_SDK_PATH="$ANDROID_HOME" \
           buildozer -v android debug 2>&1 | tee "$GITHUB_WORKSPACE/buildozer.log"
+          STATUS=${PIPESTATUS[0]}
+
+          echo ""
+          echo "================= GREP IMPORTANT LINES ================="
+          grep -nE "ERROR|Error:|Exception|Traceback|FAILED|failed|No recipe|Recipe|Command failed" \
+            "$GITHUB_WORKSPACE/buildozer.log" | tail -n 120 || true
+
+          echo ""
+          echo "================= LAST 250 LINES ================="
+          tail -n 250 "$GITHUB_WORKSPACE/buildozer.log" || true
+
+          exit $STATUS
 
       - name: Upload APK (if exists)
         if: always()
