@@ -28,15 +28,92 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # Setup Android SDK (runner thường đã có /usr/local/lib/android/sdk)
+      # Setup Android SDK (có cmdline-tools)
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Prepare Android SDK for Buildozer (sdkmanager shim + install packages)
+        shell: bash
+        run: |
+          set -eux
+
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
+          echo "ANDROID_HOME=${ANDROID_HOME:-}"
+
+          SDKROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ -z "${SDKROOT:-}" ] || [ ! -d "$SDKROOT" ]; then
+            echo "❌ Không có Android SDK root hợp lệ: $SDKROOT"
+            ls -la /usr/local/lib/android || true
+            exit 1
+          fi
+          echo "✅ SDKROOT=$SDKROOT"
+
+          # Lưu env cho các step sau
+          {
+            echo "ANDROID_SDK_ROOT=$SDKROOT"
+            echo "ANDROID_HOME=$SDKROOT"
+            echo "ANDROIDSDK=$SDKROOT"
+            echo "APP_ANDROID_SDK_PATH=$SDKROOT"
+          } >> "$GITHUB_ENV"
+
+          # Ưu tiên sdkmanager trong cmdline-tools/latest, fallback các path khác
+          SDKM=""
+          if [ -x "$SDKROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKM="$SDKROOT/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKM="$(find "$SDKROOT" -type f -name sdkmanager 2>/dev/null | head -n 1 || true)"
+          fi
+
+          if [ -z "$SDKM" ] || [ ! -f "$SDKM" ]; then
+            echo "❌ Không tìm thấy sdkmanager trong $SDKROOT"
+            find "$SDKROOT" -maxdepth 5 -type f | head -n 200 || true
+            exit 1
+          fi
+          chmod +x "$SDKM" || true
+          echo "✅ sdkmanager thật = $SDKM"
+
+          # Buildozer hay check tools/bin/sdkmanager (đường dẫn cũ) -> tạo shim nếu cần
+          mkdir -p "$SDKROOT/tools/bin"
+          if [ ! -e "$SDKROOT/tools/bin/sdkmanager" ]; then
+            ln -s "$SDKM" "$SDKROOT/tools/bin/sdkmanager"
+          else
+            # Nếu đã tồn tại nhưng không trỏ đúng, mới overwrite
+            REAL="$(readlink -f "$SDKROOT/tools/bin/sdkmanager" || true)"
+            if [ "$REAL" != "$(readlink -f "$SDKM")" ]; then
+              ln -sfn "$SDKM" "$SDKROOT/tools/bin/sdkmanager"
+            fi
+          fi
+          chmod +x "$SDKROOT/tools/bin/sdkmanager" || true
+          echo "✅ shim sdkmanager = $SDKROOT/tools/bin/sdkmanager"
+
+          # Add PATH cho chắc
+          echo "$SDKROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$SDKROOT/tools/bin" >> "$GITHUB_PATH"
+          echo "$(dirname "$SDKM")" >> "$GITHUB_PATH"
+
+          echo "✅ which sdkmanager:"
+          command -v sdkmanager || true
+          ls -la "$SDKROOT/tools/bin/sdkmanager" || true
+
+          # Accept licenses: KHÔNG được chạy "yes" một mình
+          set +e
+          yes | "$SDKROOT/tools/bin/sdkmanager" --licenses >/dev/null 2>&1
+          set -e
+
+          # Cài packages tối thiểu để khỏi lỗi AIDL/build-tools/platforms
+          "$SDKROOT/tools/bin/sdkmanager" --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "cmdline-tools;latest"
+
+          ls -la "$SDKROOT/build-tools" || true
+          ls -la "$SDKROOT/platforms" || true
 
       - name: Install system deps
         shell: bash
         run: |
           set -eux
-          sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y \
             git zip unzip rsync \
@@ -44,9 +121,8 @@ jobs:
             autoconf automake libtool pkg-config \
             libffi-dev libssl-dev zlib1g-dev \
             libjpeg-dev libpng-dev \
-            libsqlite3-dev libbz2-dev liblzma-dev \
-            python3-dev \
-            libncurses5:i386 libstdc++6:i386 zlib1g:i386
+            libltdl-dev \
+            python3-dev
 
       - name: Install Buildozer
         shell: bash
@@ -66,74 +142,6 @@ jobs:
           restore-keys: |
             buildozer-${{ runner.os }}-
 
-      - name: Prepare Android SDK for Buildozer (sdkmanager shim + packages)
-        shell: bash
-        run: |
-          set -eux
-
-          # Ưu tiên SDK preinstalled của runner (ổn định nhất)
-          if [ -d "/usr/local/lib/android/sdk" ]; then
-            SDKROOT="/usr/local/lib/android/sdk"
-          else
-            SDKROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
-          fi
-
-          echo "✅ SDKROOT=$SDKROOT"
-          if [ -z "${SDKROOT:-}" ] || [ ! -d "$SDKROOT" ]; then
-            echo "❌ Không có Android SDK root hợp lệ"
-            exit 1
-          fi
-
-          # Unset mấy biến NDK của runner để khỏi gây nhiễu (Buildozer tự kéo NDK r25b)
-          unset ANDROID_NDK ANDROID_NDK_HOME ANDROID_NDK_ROOT ANDROID_NDK_LATEST_HOME || true
-
-          # Chọn sdkmanager "xịn" (cmdline-tools/latest)
-          if [ -x "$SDKROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-            SDKM="$SDKROOT/cmdline-tools/latest/bin/sdkmanager"
-          else
-            SDKM="$(find "$SDKROOT/cmdline-tools" -type f -path "*/bin/sdkmanager" | head -n 1 || true)"
-          fi
-
-          if [ -z "${SDKM:-}" ] || [ ! -x "$SDKM" ]; then
-            echo "❌ Không tìm thấy sdkmanager trong $SDKROOT"
-            find "$SDKROOT" -maxdepth 4 -type f | head -n 200 || true
-            exit 1
-          fi
-          echo "✅ sdkmanager = $SDKM"
-
-          # Buildozer/p4a đời cũ hay check $SDKROOT/tools/bin/sdkmanager => tạo shim an toàn
-          mkdir -p "$SDKROOT/tools/bin"
-          TARGET="$SDKROOT/tools/bin/sdkmanager"
-          SRC_REAL="$(readlink -f "$SDKM" || true)"
-          TGT_REAL="$(readlink -f "$TARGET" 2>/dev/null || true)"
-
-          if [ "$SRC_REAL" != "$TGT_REAL" ]; then
-            ln -sf "$SDKM" "$TARGET" || true
-          fi
-          chmod +x "$TARGET" || true
-          echo "✅ shim sdkmanager = $TARGET"
-
-          # Add PATH
-          echo "$SDKROOT/platform-tools" >> "$GITHUB_PATH"
-          echo "$SDKROOT/tools/bin" >> "$GITHUB_PATH"
-          echo "$(dirname "$SDKM")" >> "$GITHUB_PATH"
-
-          # Accept licenses: tránh fail vì SIGPIPE của yes
-          set +o pipefail
-          yes | "$SDKM" --licenses >/dev/null 2>&1 || true
-          set -o pipefail
-
-          # Cài packages để khỏi lỗi AIDL/build-tools
-          "$SDKM" --install \
-            "platform-tools" \
-            "platforms;android-33" \
-            "build-tools;33.0.2" \
-            "cmdline-tools;latest"
-
-          # Quick check: aidl phải tồn tại
-          ls -la "$SDKROOT/build-tools" || true
-          find "$SDKROOT/build-tools" -maxdepth 3 -name aidl -type f | head -n 20 || true
-
       - name: Unzip project
         shell: bash
         run: |
@@ -149,11 +157,12 @@ jobs:
 
           echo "✅ Using zip: $ZIP_FILE"
           unzip -q "$ZIP_FILE" -d work
+
+          echo "=== Preview after unzip ==="
           find work -maxdepth 3 -type f | head -n 200
 
-      - name: Build APK (capture log)
+      - name: Build APK (Buildozer)
         shell: bash
-        continue-on-error: true
         run: |
           set -eux
 
@@ -181,39 +190,23 @@ jobs:
 
           python -m compileall -q -f . || true
 
-          # Ép p4a dùng đúng SDKROOT
-          if [ -d "/usr/local/lib/android/sdk" ]; then
-            SDKROOT="/usr/local/lib/android/sdk"
-          else
-            SDKROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
-          fi
-
-          export ANDROID_SDK_ROOT="$SDKROOT"
-          export ANDROID_HOME="$SDKROOT"
-          export ANDROIDSDK="$SDKROOT"
-          export APP_ANDROID_SDK_PATH="$SDKROOT"
+          # Dùng SDKROOT từ GITHUB_ENV
+          echo "✅ ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "✅ sdkmanager path:"
+          command -v sdkmanager || true
+          ls -la "$ANDROID_SDK_ROOT/tools/bin/sdkmanager" || true
 
           set -o pipefail
           buildozer -v android debug 2>&1 | tee "$GITHUB_WORKSPACE/buildozer.log"
 
-      - name: Print important log lines
+      - name: Show important log lines (always)
         if: always()
         shell: bash
         run: |
           echo "==== GREP IMPORTANT LINES ===="
-          grep -nE "ERROR|FAIL|Traceback|Exception|not found|No such file|sdkmanager|Aidl|aidl|build-tools|platforms|recipe|Cython|clang|gradle" buildozer.log | tail -n 250 || true
-          echo "==== LAST 400 LINES ===="
-          tail -n 400 buildozer.log || true
-
-      - name: Fail job if build failed
-        shell: bash
-        run: |
-          # Nếu buildozer step fail thì trong log thường có "Buildozer failed"
-          if grep -q "Buildozer failed" buildozer.log; then
-            echo "❌ Build failed (see buildozer.log above)"
-            exit 1
-          fi
-          echo "✅ Build looks OK"
+          grep -nE "ERROR|FAIL|Traceback|Exception|not found|No such file|recipe|sdkmanager|gradle|clang|Cython|Aidl|build-tools|platforms" buildozer.log | tail -n 260 || true
+          echo "==== LAST 320 LINES ===="
+          tail -n 320 buildozer.log || true
 
       - name: Upload logs
         if: always()
