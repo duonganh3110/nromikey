@@ -28,7 +28,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # Cài Android SDK cmdline-tools + add vào PATH
+      # Cài Android SDK (kèm cmdline-tools) + set ANDROID_SDK_ROOT/ANDROID_HOME
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
@@ -47,22 +47,32 @@ jobs:
           fi
           echo "✅ SDKROOT=$SDKROOT"
 
-          # Tìm sdkmanager thật (nằm trong cmdline-tools)
-          SDKM="$(find "$SDKROOT" -type f -name sdkmanager | head -n 1 || true)"
+          # ✅ Ưu tiên sdkmanager trong cmdline-tools/latest/bin (đúng chuẩn mới)
+          SDKM=""
+          if [ -x "$SDKROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKM="$SDKROOT/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKM="$(find "$SDKROOT" -type f -name sdkmanager | head -n 1 || true)"
+          fi
+
           if [ -z "$SDKM" ]; then
             echo "❌ Không tìm thấy sdkmanager trong $SDKROOT"
-            find "$SDKROOT" -maxdepth 4 -type f | head -n 200 || true
+            find "$SDKROOT" -maxdepth 6 -type f | head -n 240 || true
             exit 1
           fi
           echo "✅ sdkmanager thật = $SDKM"
 
-          # Buildozer đời cũ hay check tools/bin/sdkmanager -> tạo shim
+          # ✅ Buildozer đời cũ hay check tools/bin/sdkmanager => tạo shim nếu cần
           mkdir -p "$SDKROOT/tools/bin"
-          ln -sf "$SDKM" "$SDKROOT/tools/bin/sdkmanager"
-          chmod +x "$SDKROOT/tools/bin/sdkmanager" || true
-          echo "✅ shim sdkmanager = $SDKROOT/tools/bin/sdkmanager"
+          if [ "$SDKM" != "$SDKROOT/tools/bin/sdkmanager" ]; then
+            ln -sf "$SDKM" "$SDKROOT/tools/bin/sdkmanager"
+            chmod +x "$SDKROOT/tools/bin/sdkmanager" || true
+            echo "✅ shim sdkmanager = $SDKROOT/tools/bin/sdkmanager -> $SDKM"
+          else
+            echo "✅ sdkmanager đã là tools/bin/sdkmanager, bỏ qua shim"
+          fi
 
-          # Add PATH cho chắc
+          # Add PATH cho chắc (platform-tools + tools/bin + cmdline-tools bin)
           echo "$SDKROOT/platform-tools" >> "$GITHUB_PATH"
           echo "$SDKROOT/tools/bin" >> "$GITHUB_PATH"
           echo "$(dirname "$SDKM")" >> "$GITHUB_PATH"
@@ -78,9 +88,11 @@ jobs:
             "platforms;android-34" \
             "build-tools;34.0.0"
 
-          # Show quick check
+          # Quick check
+          echo "=== CHECK SDK ==="
           ls -la "$SDKROOT/build-tools" || true
           ls -la "$SDKROOT/platforms" || true
+          command -v sdkmanager || true
 
       - name: Install system deps
         run: |
