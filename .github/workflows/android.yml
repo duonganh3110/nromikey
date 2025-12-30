@@ -13,11 +13,12 @@ jobs:
   build:
     runs-on: ubuntu-22.04
 
-    # ✅ CỐ ĐỊNH SDK ROOT để khỏi nhảy loạn
     env:
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROIDSDK: /usr/local/lib/android/sdk
+      ANDROID_API: "34"
+      ANDROID_MINAPI: "21"
+      BUILD_TOOLS_VERSION: "34.0.0"
+      # p4a hay “hợp” với NDK r25b (25.2.9519653) hơn các NDK mới hơn trong nhiều case
+      NDK_VERSION: "25.2.9519653"
 
     steps:
       - name: Checkout
@@ -37,85 +38,81 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Prepare Android SDK for Buildozer (sdkmanager shim + packages)
+      # ✅ Quan trọng: tạo wrapper tools/bin/sdkmanager + tools/bin/avdmanager
+      # để Buildozer/p4a không bị “mù” vì nó hay check đường dẫn legacy tools/bin.
+      - name: Prepare Android SDK for Buildozer (wrappers + install packages)
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
-          SDKROOT="${ANDROID_SDK_ROOT}"
-          echo "✅ ANDROID_SDK_ROOT=$SDKROOT"
-          echo "✅ ANDROID_HOME=$ANDROID_HOME"
-          echo "✅ ANDROIDSDK=$ANDROIDSDK"
-
-          if [ ! -d "$SDKROOT" ]; then
-            echo "❌ SDKROOT not found: $SDKROOT"
+          SDKROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          echo "SDKROOT=$SDKROOT"
+          if [ -z "${SDKROOT:-}" ] || [ ! -d "$SDKROOT" ]; then
+            echo "❌ ANDROID_SDK_ROOT/ANDROID_HOME không hợp lệ"
+            env | sort
             exit 1
           fi
 
-          # --- 1) Tìm sdkmanager thật ---
-          SDKM=""
-          if [ -x "$SDKROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-            SDKM="$SDKROOT/cmdline-tools/latest/bin/sdkmanager"
-          else
-            SDKM="$(find "$SDKROOT" -type f -name sdkmanager | head -n 1 || true)"
-          fi
+          # Tìm sdkmanager/avdmanager thật trong cmdline-tools
+          REAL_SDKM="$(find "$SDKROOT/cmdline-tools" -type f -path '*/bin/sdkmanager' | sort | tail -n 1 || true)"
+          REAL_AVDM="$(find "$SDKROOT/cmdline-tools" -type f -path '*/bin/avdmanager' | sort | tail -n 1 || true)"
+          echo "REAL_SDKM=$REAL_SDKM"
+          echo "REAL_AVDM=$REAL_AVDM"
 
-          if [ -z "${SDKM:-}" ] || [ ! -x "$SDKM" ]; then
-            echo "❌ Không tìm thấy sdkmanager executable trong $SDKROOT"
-            find "$SDKROOT" -maxdepth 5 -type f | head -n 200 || true
+          if [ -z "$REAL_SDKM" ]; then
+            echo "❌ Không thấy sdkmanager trong $SDKROOT/cmdline-tools"
+            find "$SDKROOT" -maxdepth 4 -type f | head -n 200 || true
             exit 1
           fi
-          echo "✅ sdkmanager thật = $SDKM"
 
-          # --- 2) Buildozer/p4a legacy check: tools/bin/sdkmanager ---
-          mkdir -p "$SDKROOT/tools/bin"
-          TARGET="$SDKROOT/tools/bin/sdkmanager"
+          mkdir -p "$SDKROOT/tools/bin" "$SDKROOT/tools"
 
-          # ✅ FIX crash: chỉ ln khi TARGET chưa trỏ đúng
-          SAME="0"
-          if [ -e "$TARGET" ]; then
-            TGT_REAL="$(readlink -f "$TARGET" 2>/dev/null || true)"
-            SRC_REAL="$(readlink -f "$SDKM" 2>/dev/null || true)"
-            if [ -n "$TGT_REAL" ] && [ -n "$SRC_REAL" ] && [ "$TGT_REAL" = "$SRC_REAL" ]; then
-              SAME="1"
-            fi
+          # Wrapper sdkmanager ở tools/bin (tránh ln -sf bị same file)
+          cat > "$SDKROOT/tools/bin/sdkmanager" <<EOF
+          #!/usr/bin/env bash
+          exec "$REAL_SDKM" "\$@"
+          EOF
+          chmod +x "$SDKROOT/tools/bin/sdkmanager"
+
+          # Wrapper avdmanager (p4a đôi khi gọi avdmanager list target)
+          if [ -n "$REAL_AVDM" ]; then
+            cat > "$SDKROOT/tools/bin/avdmanager" <<EOF
+          #!/usr/bin/env bash
+          exec "$REAL_AVDM" "\$@"
+          EOF
+            chmod +x "$SDKROOT/tools/bin/avdmanager"
           fi
 
-          if [ "$SAME" = "0" ]; then
-            ln -sf "$SDKM" "$TARGET"
-          fi
-          chmod +x "$TARGET" || true
-          echo "✅ shim sdkmanager = $TARGET -> $(readlink -f "$TARGET" || echo "$SDKM")"
+          # Stub 'android' tool (đời cũ) để qua check nếu có
+          cat > "$SDKROOT/tools/android" <<'EOF'
+          #!/usr/bin/env bash
+          echo "android tool is deprecated; use sdkmanager/avdmanager." >&2
+          exit 0
+          EOF
+          chmod +x "$SDKROOT/tools/android"
 
-          # --- 3) Add PATH ---
+          # PATH cho chắc
           echo "$SDKROOT/platform-tools" >> "$GITHUB_PATH"
           echo "$SDKROOT/tools/bin" >> "$GITHUB_PATH"
-          echo "$(dirname "$SDKM")" >> "$GITHUB_PATH"
+          echo "$(dirname "$REAL_SDKM")" >> "$GITHUB_PATH"
 
-          # --- 4) Accept licenses (✅ không chết vì Broken pipe) ---
-          set +e
-          yes | "$TARGET" --licenses >/dev/null 2>&1
-          true
-          set -e
+          # Accept licenses: tránh fail vì SIGPIPE/Broken pipe
+          yes | "$SDKROOT/tools/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
 
-          # --- 5) Install packages tối thiểu để khỏi lỗi AIDL/build-tools ---
-          "$TARGET" --install \
+          # Cài packages cần thiết
+          "$SDKROOT/tools/bin/sdkmanager" --install \
             "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0"
+            "platforms;android-${ANDROID_API}" \
+            "build-tools;${BUILD_TOOLS_VERSION}" \
+            "ndk;${NDK_VERSION}" \
+            "cmake;3.22.1"
 
-          echo "=== CHECK build-tools ==="
-          ls -la "$SDKROOT/build-tools" || true
-          echo "=== CHECK aidl ==="
-          find "$SDKROOT/build-tools" -type f -name aidl | head -n 20 || true
-          echo "=== CHECK sdkmanager ==="
-          command -v sdkmanager || true
-          sdkmanager --version || true
+          echo "NDK_DIR=$SDKROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "✅ Installed NDK_DIR=$SDKROOT/ndk/${NDK_VERSION}"
+          ls -la "$SDKROOT/ndk/${NDK_VERSION}" | head -n 50 || true
 
       - name: Install system deps
-        shell: bash
         run: |
-          set -eux
           sudo apt-get update
           sudo apt-get install -y \
             git zip unzip rsync \
@@ -127,22 +124,21 @@ jobs:
             python3-dev
 
       - name: Install Buildozer
-        shell: bash
         run: |
-          set -eux
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install "cython<3" buildozer
 
-      - name: Cache Buildozer/Gradle
+      # ✅ Tạm thời KHÔNG cache ~/.buildozer cho tới khi build thành công ổn định
+      # (cache cũ rất hay kéo theo SDK/NDK lỗi → fail lặp vô tận)
+      - name: Cache Gradle (optional)
         uses: actions/cache@v4
         with:
           path: |
-            ~/.buildozer
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/buildozer.spec') }}
           restore-keys: |
-            buildozer-${{ runner.os }}-
+            gradle-${{ runner.os }}-
 
       - name: Unzip project
         shell: bash
@@ -161,12 +157,15 @@ jobs:
           unzip -q "$ZIP_FILE" -d work
 
           echo "=== Preview after unzip ==="
-          find work -maxdepth 4 -type f | head -n 200
+          find work -maxdepth 3 -type f | head -n 200
 
       - name: Build APK
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
+
+          # dọn cache buildozer để khỏi dính SDK/NDK cũ
+          rm -rf ~/.buildozer || true
 
           MAIN_PATH="$(find work -type f -name 'main.py' | head -n 1)"
           if [ -z "$MAIN_PATH" ]; then
@@ -184,33 +183,76 @@ jobs:
           fi
           cp "$GITHUB_WORKSPACE/buildozer.spec" "$PROJECT_DIR/buildozer.spec"
 
-          if [ -d "$GITHUB_WORKSPACE/p4a-recipes" ]; then
-            rsync -a "$GITHUB_WORKSPACE/p4a-recipes" "$PROJECT_DIR/"
+          cd "$PROJECT_DIR"
+
+          # Patch buildozer.spec: ép dùng SDK/NDK của runner + bật log_level=2 để thấy lỗi thật
+          SDKROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          NDKDIR="${NDK_DIR:-}"
+          if [ -z "$NDKDIR" ]; then
+            echo "❌ NDK_DIR chưa được set"
+            exit 1
           fi
 
-          cd "$PROJECT_DIR"
+          # helper replace/add key dưới section [app]
+          add_or_replace_app () {
+            local key="$1" val="$2"
+            if grep -qE "^[[:space:]]*${key}[[:space:]]*=" buildozer.spec; then
+              sed -i -E "s|^[[:space:]]*${key}[[:space:]]*=.*|${key} = ${val}|g" buildozer.spec
+            else
+              sed -i -E "/^\[app\][[:space:]]*$/a ${key} = ${val}" buildozer.spec
+            fi
+          }
+
+          # helper replace/add key dưới section [buildozer]
+          add_or_replace_buildozer () {
+            local key="$1" val="$2"
+            if ! grep -qE "^\[buildozer\]" buildozer.spec; then
+              printf "\n[buildozer]\n" >> buildozer.spec
+            fi
+            if grep -qE "^[[:space:]]*${key}[[:space:]]*=" buildozer.spec; then
+              sed -i -E "s|^[[:space:]]*${key}[[:space:]]*=.*|${key} = ${val}|g" buildozer.spec
+            else
+              sed -i -E "/^\[buildozer\][[:space:]]*$/a ${key} = ${val}" buildozer.spec
+            fi
+          }
+
+          add_or_replace_buildozer "log_level" "2"
+
+          add_or_replace_app "android.sdk_path" "$SDKROOT"
+          add_or_replace_app "android.ndk_path" "$NDKDIR"
+          add_or_replace_app "android.api" "${ANDROID_API}"
+          add_or_replace_app "android.minapi" "${ANDROID_MINAPI}"
+          add_or_replace_app "android.ndk_api" "${ANDROID_MINAPI}"
+
+          echo "=== buildozer.spec (patched) ==="
+          sed -n '1,220p' buildozer.spec
+
+          # Check syntax (không chặn build)
           python -m compileall -q -f . || true
 
-          # ✅ Ép buildozer/p4a dùng đúng SDKROOT cố định
-          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}"
-          export ANDROID_HOME="${ANDROID_SDK_ROOT}"
-          export ANDROIDSDK="${ANDROID_SDK_ROOT}"
-          export APP_ANDROID_SDK_PATH="${ANDROID_SDK_ROOT}"
+          export ANDROID_SDK_ROOT="$SDKROOT"
+          export ANDROID_HOME="$SDKROOT"
+          export ANDROIDSDK="$SDKROOT"
+          export APP_ANDROID_SDK_PATH="$SDKROOT"
 
-          # ✅ Tránh p4a bị dính NDK hệ thống (r27/r28) gây loạn
-          unset ANDROID_NDK ANDROID_NDK_HOME ANDROID_NDK_ROOT || true
+          export ANDROID_NDK_HOME="$NDKDIR"
+          export ANDROID_NDK_ROOT="$NDKDIR"
+          export ANDROIDNDK="$NDKDIR"
 
-          set -o pipefail
+          echo "which sdkmanager: $(command -v sdkmanager || true)"
+          echo "which avdmanager: $(command -v avdmanager || true)"
+          sdkmanager --version || true
+          avdmanager --help | head -n 5 || true
+
           buildozer -v android debug 2>&1 | tee "$GITHUB_WORKSPACE/buildozer.log"
 
       - name: Show last log lines on failure
         if: failure()
-        shell: bash
         run: |
           echo "==== GREP IMPORTANT LINES ===="
-          grep -nE "ERROR|FAIL|Traceback|Exception|not found|No such file|sdkmanager|aidl|build-tools|platforms|gradle|clang|Cython|recipe" buildozer.log | tail -n 260 || true
-          echo "==== LAST 350 LINES ===="
-          tail -n 350 buildozer.log || true
+          grep -nE "ERROR|FAIL|Traceback|Exception|not found|No such file|sdkmanager|avdmanager|android\.sdk|android\.ndk|NDK|Cython|clang|gradle|Aidl|build-tools|platforms" buildozer.log | tail -n 260 || true
+          echo "==== LAST 400 LINES ===="
+          tail -n 400 buildozer.log || true
 
       - name: Upload logs
         if: always()
